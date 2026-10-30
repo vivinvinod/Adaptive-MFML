@@ -36,7 +36,7 @@ from saturatedmfml.MFML_Model import ModelMFML
 
 ADAPTIVE_SIZES = np.asarray([768, 112, 28, 12])
 KRR_NMAX = 6
-SEED = 0
+SEED = 42
 OUT = RESULTS_ROOT / 'ani_accuracy_table'
 
 
@@ -141,7 +141,7 @@ def write_tables(rows):
 
     caption = (
         r'\caption{Accuracy of the single-fidelity KRR and adaptive-MFML models '
-        r'on the holdout test set of ANI-1ccx (seed 0, 85:5:10 split; the '
+        r'on the holdout test set of ANI-1ccx (seed 42, 85:5:10 split; the '
         r'validation split is not used here). Both models are evaluated at '
         r'comparable total acquisition costs ($\sim$2.8~h and $\sim$3.5~h, including two validation labels). '
         r'Energies are mean-centred; MAE, RMSE and RMAE are over all test '
