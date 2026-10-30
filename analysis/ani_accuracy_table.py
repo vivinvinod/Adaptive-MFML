@@ -1,20 +1,16 @@
 """ANI-1ccx accuracy table for referee comment R2.5b.
 
-Trains the two models specified in ``table.md`` on the fixed 85:5:10 split of
-the 50k ANI-1ccx subset and reports:
-
-  * MAE and RMSE over all 5,000 test conformers [kcal/mol]
-  * MAE per atom, computed per molecule and averaged over molecules
-  * RMAE (per molecule, averaged over molecules; global value also printed)
-  * within-molecule relative-energy RMSE over the conformers of each molecule
-  * test sample counts (conformers and molecules, mean conformers/molecule)
+Trains the two models specified in ``table.md`` on the ANI-1ccx 50k subset
+using an 85:5:10 train:validation:test split (seed 0; the validation split is
+not used) and reports MAE, RMSE, per-atom MAE and RMAE on the 10 % test split.
 
 Models:
   * single-fidelity KRR on 2^6 = 64 CCSD(T)*/CBS labels
   * adaptive-MFML with terminal composition [768, 112, 28, 12]
 
-Molecule identity is taken from the atomic-number sequence Z of each conformer,
-because the prepared 50k npz does not retain the original molecule IDs.
+Molecule identity for the per-molecule averaging of per-atom error and RMAE is
+taken from canonical SMILES obtained by RDKit bond perception, because the
+prepared 50k npz does not retain the original molecule IDs.
 
 Outputs are written to ``results/ani_accuracy_table/``.
 """
@@ -40,26 +36,21 @@ from saturatedmfml.MFML_Model import ModelMFML
 
 ADAPTIVE_SIZES = np.asarray([768, 112, 28, 12])
 KRR_NMAX = 6
-SEED = 42
+SEED = 0
 OUT = RESULTS_ROOT / 'ani_accuracy_table'
 
 
 def test_ids_and_atom_counts(seed=SEED):
-    """Reproduce the 90/10 test split and identify molecules by connectivity.
-
-    The prepared 50k npz does not store molecule IDs.  Molecules are therefore
-    identified by the canonical SMILES obtained from RDKit bond perception on
-    each test geometry; structures for which perception fails are treated as
-    separate molecules.
-    """
+    """Reproduce the 85:5:10 split and identify test molecules by connectivity."""
     npz = np.load(f'{ANI_DIR}/ANI1x_multifidelity_50k_allfids.npz', allow_pickle=True)
-    Z = npz['Z']
-    R = npz['X']
+    Z, R = npz['Z'], npz['X']
     idx = np.arange(Z.shape[0])
+    # partition_ANI_data uses 90/10 first, then 85/90 of the train part;
+    # the held-out test set is therefore the 10 % part (train 85 %, val 5 %).
     _, test_idx = train_test_split(idx, train_size=0.9, random_state=seed)
     Z_test, R_test = Z[test_idx], R[test_idx]
 
-    mol_ids, n_atoms, n_fail = [], [], 0
+    mol_ids, n_atoms = [], []
     for k, (z, r) in enumerate(zip(Z_test, R_test)):
         n_atoms.append(len(z))
         try:
@@ -75,8 +66,7 @@ def test_ids_and_atom_counts(seed=SEED):
             mol_ids.append(Chem.MolToSmiles(mol))
         except Exception:
             mol_ids.append(f'FAIL_{k}')
-            n_fail += 1
-    return mol_ids, n_atoms, n_fail
+    return mol_ids, n_atoms
 
 
 def krr_sf_predictions():
@@ -130,101 +120,66 @@ def metrics(pred, y, mol_ids, n_atoms):
 
     mae = float(np.mean(np.abs(res)))
     rmse = float(np.sqrt(np.mean(res ** 2)))
-    rmae_global = float(np.mean(np.abs(res / y)))
-
-    per_atom, rmae_mol, within = [], [], []
-    for mid, ind in groups.items():
-        n_at = n_atoms[ind[0]]
+    per_atom = []
+    for _, ind in groups.items():
         r = res[ind]
-        per_atom.append(np.mean(np.abs(r)) / n_at)
-        rmae_mol.append(np.mean(np.abs(r / y[ind])))
-        if len(ind) >= 2:
-            yy = y[ind]
-            pp = pred[ind]
-            d = (yy - yy.min()) - (pp - pp.min())
-            within.append(np.sqrt(np.mean(d ** 2)))
-
-    n_conf = np.asarray([len(v) for v in groups.values()])
-    return dict(
-        n_test=len(y), n_mol=len(groups), mean_conf=float(n_conf.mean()),
-        mae=mae, rmse=rmse, mae_atom=float(np.mean(per_atom)),
-        rmae_mol=float(np.mean(rmae_mol)), rmae_global=rmae_global,
-        within_rmse=float(np.mean(within)), n_mol_multi=len(within),
-        n_conf_multi=int(sum(len(groups[k]) for k in groups
-                             if len(groups[k]) >= 2)),
-    )
+        per_atom.append(np.mean(np.abs(r)) / n_atoms[ind[0]])
+    rmae = float(np.mean(np.abs(res / y)))   # Eq. (6), over all test conformers
+    return dict(mae=mae, rmse=rmse, mae_atom=float(np.mean(per_atom)), rmae=rmae)
 
 
-def write_tables(rows, n_fail):
+def write_tables(rows):
     results_dir(OUT)
     labels = [('Single-fidelity KRR ($2^6$)', rows[0]),
               ('Adaptive-MFML [768,112,28,12]', rows[1])]
-    md = ['| Model | N_test | N_mol | MAE [kcal/mol] | RMSE [kcal/mol] | MAE per atom [kcal/mol] | RMAE | Within-molecule RMSE [kcal/mol] | mean n_conf |',
-          '|---|---|---|---|---|---|---|---|---|']
+    md = ['| Model | MAE [kcal/mol] | RMSE [kcal/mol] | MAE per atom [kcal/mol] | RMAE |',
+          '|---|---|---|---|---|']
     for name, m in labels:
-        md.append(f'| {name} | {m["n_test"]} | {m["n_mol"]} | {m["mae"]:.4f} | '
-                  f'{m["rmse"]:.4f} | {m["mae_atom"]:.4f} | {m["rmae_mol"]:.4f} | '
-                  f'{m["within_rmse"]:.4f} | {m["mean_conf"]:.2f} |')
-    md += ['', 'Molecule identity: canonical SMILES from RDKit connectivity; '
-               f'{n_fail} structures with failed bond perception are '
-               'treated as separate molecules. '
-               f'Within-molecule RMSE uses molecules with $\\ge2$ test conformers '
-               f'(N={rows[0]["n_mol_multi"]}, {rows[0]["n_conf_multi"]} conformers); '
-               'single-conformer molecules are excluded. Global RMAE (Eq. 6): '
-               f'KRR {rows[0]["rmae_global"]:.4f}, adaptive {rows[1]["rmae_global"]:.4f}.']
+        md.append(f'| {name} | {m["mae"]:.4f} | {m["rmse"]:.4f} | '
+                  f'{m["mae_atom"]:.4f} | {m["rmae"]:.4f} |')
     (OUT / 'ani_accuracy_table.md').write_text('\n'.join(md) + '\n')
 
-    tex = r'''\begin{table}[htb!]
-  \centering
-  \caption{Accuracy of the adaptive-MFML model and of the single-fidelity KRR
-  model on the holdout test set of ANI-1ccx. Both models are evaluated at
-  comparable total acquisition costs ($\sim$3.4~h and $\sim$2.8~h).
-  Energies are mean-centred. MAE/RMSE are over all test conformers; the
-  per-atom error and RMAE are computed per molecule and averaged over
-  molecules. Molecules are identified by canonical SMILES from RDKit
-  connectivity: $N_{\rm mol}=%d$, mean $n_{\rm conf}=%.2f$; %d structures for
-  which bond perception failed are treated as separate molecules. The
-  within-molecule RMSE is the error in relative energies
-  $E_i-\min_j E_j$ over the conformers of each molecule, averaged over
-  molecules with at least two conformers ($N=%d$, %d conformers).}
-  \label{tab:ani_accuracy}
-  \begin{tabular}{|l|c|c|c|c|c|c|}
-    \hline
-    \textbf{Model} & \textbf{$N_{\rm test}$} & \textbf{$N_{\rm mol}$}
-    & \textbf{MAE} & \textbf{RMSE} & \textbf{MAE/atom} & \textbf{RMAE} \\
-    & & & \textbf{[kcal/mol]} & \textbf{[kcal/mol]}
-    & \textbf{[kcal/mol]} & \\
-    \hline
-    \hline
-''' % (rows[0]['n_mol'], rows[0]['mean_conf'], n_fail, rows[0]['n_mol_multi'], rows[0]['n_conf_multi'])
+    caption = (
+        r'\caption{Accuracy of the single-fidelity KRR and adaptive-MFML models '
+        r'on the holdout test set of ANI-1ccx (seed 0, 85:5:10 split; the '
+        r'validation split is not used here). Both models are evaluated at '
+        r'comparable total acquisition costs ($\sim$2.8~h and $\sim$3.5~h, including two validation labels). '
+        r'Energies are mean-centred; MAE, RMSE and RMAE are over all test '
+        r'conformers (RMAE as in Eq. (6)); the per-atom error is computed per '
+        r'molecule and averaged over molecules.}'
+    )
+    tex = [
+        r'\begin{table}[htb!]',
+        r'  \centering',
+        '  ' + caption,
+        r'  \label{tab:ani_accuracy}',
+        r'  \begin{tabular}{|l|c|c|c|c|}',
+        r'    \hline',
+        r'    \textbf{Model} & \textbf{MAE [kcal/mol]} & \textbf{RMSE [kcal/mol]}'
+        r' & \textbf{MAE/atom [kcal/mol]} & \textbf{RMAE} \\',
+        r'    \hline',
+        r'    \hline',
+    ]
     for name, m in labels:
-        tex += (f'    {name.replace("$2^6$", "$2^6$")} & {m["n_test"]:,} & {m["n_mol"]} '
-                f'& {m["mae"]:.3f} & {m["rmse"]:.3f} & {m["mae_atom"]:.3f} '
-                f'& {m["rmae_mol"]:.4f} \\\\\n')
-    tex += (r'''    \hline
-    \multicolumn{7}{|l|}{\textbf{Within-molecule relative energies}
-      \quad RMSE [kcal/mol]: KRR: %.3f \quad adaptive: %.3f
-      \quad ($\bar n_{\rm conf}$: %.2f)} \\
-    \hline
-  \end{tabular}
-\end{table}
-''' % (rows[0]['within_rmse'], rows[1]['within_rmse'], rows[0]['mean_conf']))
-    (OUT / 'ani_accuracy_table.tex').write_text(tex)
+        tex.append(f'    {name} & {m["mae"]:.3f} & {m["rmse"]:.3f} & '
+                   f'{m["mae_atom"]:.3f} & {m["rmae"]:.4f} \\\\')
+    tex += [r'    \hline', r'  \end{tabular}', r'\end{table}', '']
+    (OUT / 'ani_accuracy_table.tex').write_text('\n'.join(tex))
     print('\n'.join(md))
 
 
 def main():
-    mol_ids, n_atoms, n_fail = test_ids_and_atom_counts()
+    mol_ids, n_atoms = test_ids_and_atom_counts()
     print('training single-fidelity KRR (2^6)...', flush=True)
     pred_krr, y_krr = krr_sf_predictions()
     m_krr = metrics(pred_krr, y_krr, mol_ids, n_atoms)
     print('training adaptive-MFML [768,112,28,12]...', flush=True)
     pred_ad, y_ad = adaptive_predictions()
     m_ad = metrics(pred_ad, y_ad, mol_ids, n_atoms)
-    write_tables([m_krr, m_ad], n_fail)
+    write_tables([m_krr, m_ad])
     print('wrote', OUT)
     for name, m in [('KRR', m_krr), ('adaptive', m_ad)]:
-        print(name, {k: (round(v, 5) if isinstance(v, float) else v) for k, v in m.items()})
+        print(name, {k: round(v, 5) for k, v in m.items()})
 
 
 if __name__ == '__main__':
