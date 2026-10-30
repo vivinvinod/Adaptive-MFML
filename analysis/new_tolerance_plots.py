@@ -1,12 +1,10 @@
-"""Legacy-style tolerance plots from the 5x5 grid (N_val=2, seed 0).
+"""Tolerance-grid figures (N_val=2, seed 0): filled 5x5 error grids.
 
-One figure per dataset/property (CH3Cl, CH3F, SCF, EV, ANI), 10x4:
-  * 3D: x = log10(total time cost), y = local tolerance, z = log10(error),
-    one line per (global, local) combination, coloured by global tolerance;
-    the log-time axis is the near horizontal axis, as in the legacy figure;
-  * scatter: global vs local tolerance, coloured by the final error.
+Each cell of the local/global tolerance grid is coloured by the final error,
+with a colorbar; no 3D panels.  VIB5 (CH3Cl, CH3F) and QeMFi (SCF, EV) are
+1x2 figures; ANI is a single panel.
 
-Writes Manuscript/publishable_plots/new_tolerance_<name>.{pdf,png}.
+Writes Manuscript/publishable_plots/new_tolerance_<group>.{pdf,png}.
 """
 import sys
 from pathlib import Path
@@ -17,9 +15,6 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from matplotlib.cm import ScalarMappable
-from matplotlib.colors import Normalize
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
 from saturatedmfml.dataset_paths import REPO_ROOT, RESULTS_SINGLE_PASS
 
@@ -34,12 +29,18 @@ ANI = np.asarray([9.64615, 16.8199, 40.34815, 157.2737]) / 3600.0
 Q5 = np.load(RESULTS_SINGLE_PASS / 'QeMFi_times.npy').mean(axis=0) / 3600.0
 QEMFI = Q5[1:]
 
-ENTRIES = [
-    ('CH3Cl', VIB5, VIB5[-1], 'MAE [kcal/mol]'),
-    ('CH3F', VIB5, VIB5[-1], 'MAE [kcal/mol]'),
-    ('SCF', QEMFI, Q5[4], 'MAE [kcal/mol]'),
-    ('EV', QEMFI, Q5[4], 'MAE [kcal/mol]'),
-    ('ANI', ANI, ANI[-1], 'RMAE'),
+GROUPS = [
+    ('VIB5', [
+        ('CH3Cl', VIB5, VIB5[-1], 'MAE [kcal/mol]'),
+        ('CH3F', VIB5, VIB5[-1], 'MAE [kcal/mol]'),
+    ]),
+    ('QeMFi', [
+        ('SCF', QEMFI, Q5[4], 'MAE [kcal/mol]'),
+        ('EV', QEMFI, Q5[4], 'MAE [kcal/mol]'),
+    ]),
+    ('ANI', [
+        ('ANI', ANI, ANI[-1], 'RMAE'),
+    ]),
 ]
 
 
@@ -47,76 +48,58 @@ def tag(v):
     return f'{v:g}'
 
 
-def curve(name, local, glob, cost_vector, val_cost):
-    prefix = GRID / name / f'local{tag(local)}_global{tag(glob)}' / '0'
-    mae = np.load(prefix.with_name(prefix.name + '_mae.npy'), allow_pickle=True).astype(float)
-    sizes = np.load(prefix.with_name(prefix.name + '_trainsizes.npy'), allow_pickle=True).astype(int)
-    cost = np.asarray([cost_vector @ s for s in sizes]) + VAL_SIZE * val_cost
-    order = np.argsort(cost)
-    return cost[order], mae[order]
+def final_matrix(name):
+    fin = np.zeros((len(LOCAL_TOLS), len(GLOBAL_TOLS)))
+    for i, l in enumerate(LOCAL_TOLS):
+        for j, g in enumerate(GLOBAL_TOLS):
+            prefix = GRID / name / f'local{tag(l)}_global{tag(g)}' / '0'
+            mae = np.load(prefix.with_name(prefix.name + '_mae.npy'),
+                          allow_pickle=True).astype(float)
+            fin[i, j] = mae[-1]
+    return fin
 
 
-def panel_3d(ax, cax, name, cost_vector, val_cost, ylabel):
-    norm = Normalize(vmin=np.log10(min(GLOBAL_TOLS)), vmax=np.log10(max(GLOBAL_TOLS)))
-    cmap = plt.cm.viridis
-    for g in GLOBAL_TOLS:
-        col = cmap(norm(np.log10(g)))
-        for i, l in enumerate(LOCAL_TOLS):
-            c, m = curve(name, l, g, cost_vector, val_cost)
-            ax.plot(np.log10(c), np.full_like(c, i), np.log10(m),
-                    color=col, lw=0.7, alpha=0.85)
-    ax.set_xticks([0, 1, 2, 3])
+def panel(ax, cax, name, ylabel):
+    fin = final_matrix(name)
+    edges = np.arange(-0.5, len(LOCAL_TOLS) + 0.5, 1.0)
+    im = ax.pcolormesh(edges, edges, fin, cmap='viridis', shading='flat')
+    gx, ly = np.meshgrid(np.arange(len(GLOBAL_TOLS)), np.arange(len(LOCAL_TOLS)))
+    ax.scatter(gx.ravel(), ly.ravel(), s=12, c='white', edgecolors='none',
+               alpha=0.55, zorder=3)
+    ax.set_xticks(np.arange(len(GLOBAL_TOLS)))
+    ax.set_xticklabels([tag(v) for v in GLOBAL_TOLS], fontsize=8)
     ax.set_yticks(np.arange(len(LOCAL_TOLS)))
-    ax.set_yticklabels([tag(v) for v in LOCAL_TOLS], fontsize=7)
-    ax.set_xlabel(r'$\log_{10}T$ [h]', fontsize=8, labelpad=6)
-    ax.set_ylabel('local $\\tau$', fontsize=8, labelpad=2)
-    ax.set_zlabel('log10 ' + ylabel.split()[0], fontsize=8, labelpad=3)
-    ax.set_title(name, fontsize=10)
-    ax.view_init(elev=22, azim=-60)
-    ax.set_box_aspect((1.6, 1.0, 1.0))
-    ax.tick_params(labelsize=7, pad=0)
-    sm = ScalarMappable(norm=norm, cmap=cmap)
-    cb = plt.colorbar(sm, cax=cax)
-    cb.set_ticks(np.log10(GLOBAL_TOLS))
-    cb.set_ticklabels([tag(v) for v in GLOBAL_TOLS])
-    cb.set_label('global $\\tau$', fontsize=8)
-    cb.ax.tick_params(labelsize=7)
-
-
-def panel_scatter(ax, cax, name, cost_vector, val_cost, ylabel):
-    xs, ys, zs = [], [], []
-    for g in GLOBAL_TOLS:
-        for l in LOCAL_TOLS:
-            c, m = curve(name, l, g, cost_vector, val_cost)
-            xs.append(g); ys.append(l); zs.append(m[-1])
-    sc = ax.scatter(xs, ys, c=zs, cmap='viridis', s=65, edgecolors='black', zorder=3)
-    ax.set_xscale('log'); ax.set_yscale('log')
-    ax.set_xticks(GLOBAL_TOLS); ax.set_xticklabels([tag(v) for v in GLOBAL_TOLS], fontsize=7)
-    ax.set_yticks(LOCAL_TOLS); ax.set_yticklabels([tag(v) for v in LOCAL_TOLS], fontsize=7)
-    ax.set_xlabel('global $\\tau$', fontsize=9)
-    ax.set_ylabel('local $\\tau$', fontsize=9)
-    ax.set_title(f'{name}: final {ylabel}', fontsize=10)
-    ax.grid(True, which='both', ls='--', alpha=0.35)
-    cb = plt.colorbar(sc, cax=cax)
+    ax.set_yticklabels([tag(v) for v in LOCAL_TOLS], fontsize=8)
+    ax.set_xticks(np.arange(-0.5, len(GLOBAL_TOLS) + 0.5, 1.0), minor=True)
+    ax.set_yticks(np.arange(-0.5, len(LOCAL_TOLS) + 0.5, 1.0), minor=True)
+    ax.grid(which='minor', color='white', lw=0.8, alpha=0.7)
+    ax.tick_params(which='minor', length=0)
+    ax.set_xlim(-0.5, len(GLOBAL_TOLS) - 0.5)
+    ax.set_ylim(-0.5, len(LOCAL_TOLS) - 0.5)
+    ax.set_xlabel('global $\\tau$', fontsize=10)
+    ax.set_ylabel('local $\\tau$', fontsize=10)
+    ax.set_title(name, fontsize=11)
+    cb = plt.colorbar(im, cax=cax)
     cb.set_label(f'final {ylabel}', fontsize=8)
     cb.ax.tick_params(labelsize=7)
 
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    for name, cost_vector, val_cost, ylabel in ENTRIES:
-        fig = plt.figure(figsize=(10, 4))
-        ax3d = fig.add_axes([0.03, 0.17, 0.45, 0.75], projection='3d')
-        ax2d = fig.add_axes([0.57, 0.17, 0.30, 0.73])
-        cax3 = fig.add_axes([0.92, 0.55, 0.012, 0.30])
-        cax2 = fig.add_axes([0.92, 0.15, 0.012, 0.30])
-        panel_3d(ax3d, cax3, name, cost_vector, val_cost, ylabel)
-        panel_scatter(ax2d, cax2, name, cost_vector, val_cost, ylabel)
+    for group, entries in GROUPS:
+        n = len(entries)
+        fig = plt.figure(figsize=(5 * n + 0.7 * n, 4))
+        gs = fig.add_gridspec(1, 2 * n, width_ratios=[1, 0.055] * n, wspace=0.42)
+        for k, (name, _, _, ylabel) in enumerate(entries):
+            ax = fig.add_subplot(gs[0, 2 * k])
+            cax = fig.add_subplot(gs[0, 2 * k + 1])
+            panel(ax, cax, name, ylabel)
+        fig.subplots_adjust(left=0.09, right=0.97, bottom=0.14, top=0.90)
         for ext in ['pdf', 'png']:
-            fig.savefig(OUT / f'new_tolerance_{name}.{ext}', bbox_inches='tight',
+            fig.savefig(OUT / f'new_tolerance_{group}.{ext}', bbox_inches='tight',
                         dpi=150 if ext == 'png' else None)
         plt.close(fig)
-        print('wrote', OUT / f'new_tolerance_{name}.pdf')
+        print('wrote', OUT / f'new_tolerance_{group}.pdf')
 
 
 if __name__ == '__main__':
